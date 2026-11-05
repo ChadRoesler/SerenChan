@@ -328,11 +328,17 @@ idf_component_register(SRCS ${SOURCES}
                         bt
                         fatfs
                         ArduinoJson
-                        esp-now
                         mooncake
                         mooncake_log
                         smooth_ui_toolkit
                     )
+
+# The tailnet (hal_tailnet.cpp) needs microlink, but only when it is compiled
+# in: the root CMakeLists excludes the component otherwise. Linked here, not via
+# PRIV_REQUIRES, because sdkconfig isn't loaded during IDF's requirements pass.
+if(CONFIG_STACKCHAN_TAILNET)
+    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::microlink)
+endif()
 
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_23)
 target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>)

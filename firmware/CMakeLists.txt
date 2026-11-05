@@ -7,7 +7,10 @@ if(CMAKE_GENERATOR MATCHES "^Ninja")
     set(CMAKE_NINJA_FORCE_RESPONSE_FILE TRUE CACHE INTERNAL "Use Ninja response files")
 endif()
 
-set(PROJECT_VER "1.6.2")
+# Deliberately higher than anything upstream ships, until the Xiaozhi OTA check is
+# culled: it installs any version above this one on its own, which replaces the
+# whole firmware with stock. Based on upstream 1.6.2.
+set(PROJECT_VER "99.6.2")
 add_definitions(-DFIRMWARE_VERSION=\"${PROJECT_VER}\")
 
 # Add this line to disable the specific warning
@@ -24,5 +27,46 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults.local")
     message(STATUS "StackChan: detected sdkconfig.defaults.local, applying overlay")
 endif()
 
+# Tailnet (microlink) is opt-in and costs nothing when CONFIG_STACKCHAN_TAILNET
+# is off. EXTRA_COMPONENT_DIRS must come BEFORE project.cmake for the components
+# to be discoverable at all; the EXCLUDE_COMPONENTS gate must come AFTER
+# project() so sdkconfig has been read.
+#
+# Only the top-level components/ dir is registered. microlink vendors a second,
+# byte-identical copy of wireguard_lwip under components/microlink/components/,
+# and adding both would fail on a duplicate component name. This matches
+# microlink's own examples/basic_connect/CMakeLists.txt.
+#
+# Fetch it first:  python3 ./fetch_repos.py
+set(MICROLINK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third-party/microlink/components")
+# IDF 6 resolves a registered component's requirements even if it is excluded later,
+# and microlink still asks for the removed 'json' component. So it is only registered
+# when something actually turns the tailnet on; sdkconfig isn't parsed yet, so read it.
+set(TAILNET_REQUESTED FALSE)
+foreach(cfg "sdkconfig" "sdkconfig.defaults.local")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${cfg}")
+        file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/${cfg}" tailnet_on REGEX "^CONFIG_STACKCHAN_TAILNET=y")
+        if(tailnet_on)
+            set(TAILNET_REQUESTED TRUE)
+        endif()
+    endif()
+endforeach()
+if(TAILNET_REQUESTED AND EXISTS "${MICROLINK_DIR}")
+    list(APPEND EXTRA_COMPONENT_DIRS "${MICROLINK_DIR}")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(stack-chan)
+
+if(NOT CONFIG_STACKCHAN_TAILNET)
+    # Keep the default build byte-identical to a tree without microlink.
+    idf_build_set_property(EXCLUDE_COMPONENTS "microlink;wireguard_lwip" APPEND)
+    message(STATUS "StackChan: tailnet disabled, microlink excluded from the build")
+else()
+    if(NOT EXISTS "${MICROLINK_DIR}")
+        message(FATAL_ERROR
+            "CONFIG_STACKCHAN_TAILNET is enabled but third-party/microlink is missing. "
+            "Run: python3 ./fetch_repos.py")
+    endif()
+    message(STATUS "StackChan: tailnet ENABLED (microlink)")
+endif()

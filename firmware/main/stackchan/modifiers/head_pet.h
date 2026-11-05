@@ -86,9 +86,21 @@ private:
         int duration = Random::getInstance().getInt(1500, 2500);
         avatar.removeDecorator(_heart_decorator_id);
         avatar.removeDecorator(_shy_decorator_id);
-        _heart_decorator_id =
-            avatar.addDecorator(std::make_unique<avatar::HeartDecorator>(lv_screen_active(), duration, 500));
-        _shy_decorator_id = avatar.addDecorator(std::make_unique<avatar::ShyDecorator>(lv_screen_active(), duration));
+        // A manifest-backed face supplies its own; otherwise the built-ins.
+        _heart_decorator_id = avatar.addNamedDecorator("heart", duration);
+        if (_heart_decorator_id < 0) {
+            _heart_decorator_id =
+                avatar.addDecorator(std::make_unique<avatar::HeartDecorator>(lv_screen_active(), duration, 500));
+        }
+
+        _shy_decorator_id = avatar.addNamedDecorator("blush", duration);
+        if (_shy_decorator_id < 0) {
+            _shy_decorator_id = avatar.addNamedDecorator("shy", duration);
+        }
+        if (_shy_decorator_id < 0) {
+            _shy_decorator_id =
+                avatar.addDecorator(std::make_unique<avatar::ShyDecorator>(lv_screen_active(), duration));
+        }
 
         // 动作反馈
         perform_pet_motion(stackchan);

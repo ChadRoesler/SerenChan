@@ -23,6 +23,14 @@ static const std::string_view OGG_NEW_NOTIFICATION{
 
 namespace assets {
 
+/**
+ * @brief Raw asset bytes, microSD first then the assets partition.
+ *
+ * A face on the card shadows the built-in one, which is what makes the
+ * SD iteration loop work without reflashing.
+ */
+bool get_raw(std::string_view name, void*& ptr, size_t& size);
+
 lv_image_dsc_t get_image(std::string_view name);
 
 }  // namespace assets

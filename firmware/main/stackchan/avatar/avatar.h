@@ -5,4 +5,5 @@
  */
 #pragma once
 #include "skins/default/default.h"
+#include "skins/custom/custom.h"
 #include "decorators/decorators.h"

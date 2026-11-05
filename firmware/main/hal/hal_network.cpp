@@ -50,6 +50,7 @@ void Hal::startNetwork(std::function<void(std::string_view)> onLog)
     if (WifiManager::GetInstance().IsConnected()) {
         mclog::tagInfo(_tag, "network already connected");
         startSntp();
+        startTailnet(onLog);
         return;
     }
 
@@ -123,6 +124,11 @@ void Hal::startNetwork(std::function<void(std::string_view)> onLog)
     board.SetNetworkEventCallback(nullptr);
 
     startSntp();
+
+    // Opt-in, and deliberately after SNTP: the tailnet handshake is
+    // timestamp-sensitive. A no-op unless CONFIG_STACKCHAN_TAILNET is set, and
+    // a failure only logs -- the assistant has to work without a tailnet.
+    startTailnet(onLog);
 }
 
 WifiStatus Hal::getWifiStatus()

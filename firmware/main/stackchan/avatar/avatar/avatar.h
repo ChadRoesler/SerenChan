@@ -7,6 +7,7 @@
 #include "elements/key_elements.h"
 #include "decorator.h"
 #include <memory>
+#include <string>
 
 namespace stackchan::avatar {
 
@@ -114,6 +115,23 @@ public:
     int addDecorator(std::unique_ptr<Decorator> decorator)
     {
         return _decorator_pool.create(std::move(decorator));
+    }
+
+    /**
+     * @brief Add a decorator this skin defines by name, e.g. "heart".
+     *
+     * Lets a manifest-backed face supply its own artwork for event
+     * decorators instead of the compiled-in defaults.
+     *
+     * @param lifetimeMs 0 keeps whatever the manifest specifies
+     * @return -1 when this skin has no decorator by that name, so callers
+     *         can fall back to the built-in one
+     */
+    virtual int addNamedDecorator(const std::string& name, uint32_t lifetimeMs = 0)
+    {
+        (void)name;
+        (void)lifetimeMs;
+        return -1;
     }
 
     bool removeDecorator(int id)

@@ -1,3 +1,4 @@
+#include <hal/ram_map.h>
 #include "wifi_board.h"
 #include "cores3_audio_codec.h"
 #include "display/lcd_display.h"
@@ -357,7 +358,7 @@ private:
     Aw9523* aw9523_;
     Ft6336* ft6336_;
     LvglDisplay* display_;
-    StackChanCamera* camera_;
+    StackChanCamera* camera_ = nullptr;
     esp_timer_handle_t touchpad_timer_;
     PowerSaveTimer* power_save_timer_;
     hal_bridge::XiaozhiConfig_t xiaozhi_config_;
@@ -677,6 +678,7 @@ private:
 public:
     M5StackCoreS3Board()
     {
+        ram_map::mark("board start");
         InitializeI2c();
         InitializeAxp2101();
         InitializePowerSaveTimer();
@@ -684,8 +686,13 @@ public:
         I2cDetect();
         InitializeFt6336();
         InitializeSpi();
+        ram_map::mark("i2c, pmic, touch, spi");
         InitializeIli9342Display();
+        ram_map::mark("display and face");
+#ifdef CONFIG_STACKCHAN_CAMERA
         InitializeCamera();
+        ram_map::mark("camera");
+#endif
         StartTouchpadTimer();
         GetBacklight()->RestoreBrightness();
     }

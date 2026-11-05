@@ -5,6 +5,7 @@
  */
 #include "assets.h"
 #include <assets.h>
+#include <hal/sd_assets.h>
 #include <mooncake_log.h>
 #include <map>
 #include <string>
@@ -20,18 +21,28 @@ static bool has_suffix(std::string_view str, std::string_view suffix)
     return false;
 }
 
+bool get_raw(std::string_view name, void*& ptr, size_t& size)
+{
+    std::string key(name);
+
+    // microSD wins, so a face on the card shadows the flashed one.
+    if (sd_assets::get(key, ptr, size)) {
+        return true;
+    }
+
+    // Otherwise the mmap'd assets partition (xiaozhi-esp32/main/assets.h).
+    return Assets::GetInstance().GetAssetData(key, ptr, size);
+}
+
 lv_image_dsc_t get_image(std::string_view name)
 {
     std::string key(name);
     lv_image_dsc_t dsc = {0};
 
-    // 1. Retrieve data from Assets partition
     void* data_ptr   = nullptr;
     size_t data_size = 0;
 
-    // Attempt to access singleton from xiaozhi-esp32/main/assets.h
-    // Since we include <assets.h>, we expect class Assets to be available.
-    if (!Assets::GetInstance().GetAssetData(key, data_ptr, data_size)) {
+    if (!get_raw(name, data_ptr, data_size)) {
         mclog::tagError(_tag, "get image asset {} failed: not found", name);
         return dsc;
     }

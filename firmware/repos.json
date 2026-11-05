@@ -26,8 +26,8 @@
         "branch": "v7.4.2"
     },
     {
-        "url": "https://github.com/espressif/esp-now.git",
-        "path": "components/esp-now",
-        "branch": "c3b5f9be245f1a80db9cb938600566aa6a8dd1e5"
+        "url": "https://github.com/CamM2325/microlink.git",
+        "path": "third-party/microlink",
+        "branch": "v2.1.0"
     }
 ]

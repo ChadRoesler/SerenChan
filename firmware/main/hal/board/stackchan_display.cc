@@ -251,20 +251,46 @@ void StackChanAvatarDisplay::SetupUI()
 
     ESP_LOGI(TAG, "Creating Stack-chan Avatar...");
 
-    auto avatar = std::make_unique<DefaultAvatar>();
-    avatar->init(lv_screen_active());
-    avatar->getPanel()->onClick().connect([]() {
-        static uint32_t last_toggle_tick = 0;
-        const uint32_t now               = GetHAL().millis();
-        if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {
+    // Tapping the face toggles the chat state, whichever skin is in use.
+    auto attach_tap_to_talk = [](uitk::lvgl_cpp::Container* panel) {
+        if (panel == nullptr) {
+            ESP_LOGW(TAG, "Avatar panel is null, tap-to-talk disabled");
             return;
         }
+        panel->onClick().connect([]() {
+            static uint32_t last_toggle_tick = 0;
+            const uint32_t now               = GetHAL().millis();
+            if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {
+                return;
+            }
 
-        if (hal_bridge::is_xiaozhi_ready()) {
-            last_toggle_tick = now;
-            hal_bridge::toggle_xiaozhi_chat_state();
-        }
-    });
+            if (hal_bridge::is_xiaozhi_ready()) {
+                last_toggle_tick = now;
+                hal_bridge::toggle_xiaozhi_chat_state();
+            }
+        });
+    };
+
+    // Prefer a sprite face from the assets partition (face.json + images).
+    // Falls back to the built-in vector face when none is flashed or it fails
+    // to load, so a bad or absent face can never stop the device from booting.
+    // See firmware/docs/custom-faces.md
+    std::unique_ptr<Avatar> avatar;
+
+    auto custom_avatar = std::make_unique<CustomAvatar>();
+    if (custom_avatar->init(lv_screen_active())) {
+        ESP_LOGI(TAG, "Using custom face: %s", custom_avatar->faceName().c_str());
+        attach_tap_to_talk(custom_avatar->getPanel());
+        avatar = std::move(custom_avatar);
+    } else {
+        ESP_LOGI(TAG, "No usable custom face, using default avatar");
+        custom_avatar.reset();
+
+        auto default_avatar = std::make_unique<DefaultAvatar>();
+        default_avatar->init(lv_screen_active());
+        attach_tap_to_talk(default_avatar->getPanel());
+        avatar = std::move(default_avatar);
+    }
 
     stackchan.attachAvatar(std::move(avatar));
     stackchan.addModifier(std::make_unique<BreathModifier>());
@@ -297,6 +323,14 @@ void StackChanAvatarDisplay::LvglUnlock()
     Unlock();
 }
 
+// The status light, shown on both sides: LEDs 0-5 are one strip and 6-11 the other.
+static void set_status_light(uint8_t r, uint8_t g, uint8_t b)
+{
+    GetHAL().setRgbColor(0, r, g, b);
+    GetHAL().setRgbColor(6, r, g, b);
+    GetHAL().refreshRgb();
+}
+
 void StackChanAvatarDisplay::CreateIdleMotionModifier()
 {
     auto& stackchan = GetStackChan();
@@ -318,6 +352,45 @@ void StackChanAvatarDisplay::CreateIdleMotionModifier()
     }
 }
 
+namespace {
+
+// Xiaozhi's full emotion vocabulary, from
+// xiaozhi-esp32/main/display/lvgl_display/emoji_collection.cc
+// mapped onto the six poses the built-in vector face can express.
+// A custom sprite face handles these strings directly and never reaches here.
+Emotion map_emotion_string(const char* emotion)
+{
+    struct Entry {
+        const char* name;
+        Emotion pose;
+    };
+
+    static const Entry table[] = {
+        {"neutral", Emotion::Neutral},      {"happy", Emotion::Happy},
+        {"laughing", Emotion::Happy},       {"funny", Emotion::Happy},
+        {"sad", Emotion::Sad},              {"angry", Emotion::Angry},
+        {"crying", Emotion::Sad},           {"loving", Emotion::Happy},
+        {"embarrassed", Emotion::Happy},    {"surprised", Emotion::Doubt},
+        {"shocked", Emotion::Doubt},        {"thinking", Emotion::Doubt},
+        {"winking", Emotion::Happy},        {"cool", Emotion::Neutral},
+        {"relaxed", Emotion::Neutral},      {"delicious", Emotion::Happy},
+        {"kissy", Emotion::Happy},          {"confident", Emotion::Neutral},
+        {"sleepy", Emotion::Sleepy},        {"silly", Emotion::Happy},
+        {"confused", Emotion::Doubt},
+    };
+
+    for (const auto& entry : table) {
+        if (strcmp(emotion, entry.name) == 0) {
+            return entry.pose;
+        }
+    }
+
+    ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
+    return Emotion::Neutral;
+}
+
+}  // namespace
+
 void StackChanAvatarDisplay::SetEmotion(const char* emotion)
 {
     auto& stackchan = GetStackChan();
@@ -328,28 +401,24 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
     DisplayLockGuard lock(this);
 
-    // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
-
     auto& avatar = stackchan.avatar();
 
-    // Map emotion string to stackchan::Emotion
-    if (strcmp(emotion, "neutral") == 0) {
-        avatar.setEmotion(Emotion::Neutral);
-    } else if (strcmp(emotion, "happy") == 0) {
-        avatar.setEmotion(Emotion::Happy);
-    } else if (strcmp(emotion, "laughing") == 0) {
-        avatar.setEmotion(Emotion::Happy);
-    } else if (strcmp(emotion, "angry") == 0) {
-        avatar.setEmotion(Emotion::Angry);
-    } else if (strcmp(emotion, "sad") == 0) {
-        avatar.setEmotion(Emotion::Sad);
-    } else if (strcmp(emotion, "crying") == 0) {
-        avatar.setEmotion(Emotion::Sad);
-    } else if (strcmp(emotion, "sleepy") == 0) {
-        avatar.setEmotion(Emotion::Sleepy);
+    // A sprite face describes each emotion in its manifest, so give it the raw
+    // protocol string and let it pick lids, mouth shape, brows and decorator.
+    // Anything it does not describe falls through to the six-pose mapping.
+    bool handled = false;
+    if (auto* custom = dynamic_cast<CustomAvatar*>(&avatar)) {
+        handled = custom->setEmotionByName(emotion);
+    }
+
+    if (!handled) {
+        avatar.setEmotion(map_emotion_string(emotion));
+    }
+
+    // Sleep is more than a pose: it parks the servos and stops idle movement.
+    if (strcmp(emotion, "sleepy") == 0) {
         avatar.setSpeech("Zzz…");
         is_sleeping_ = true;
-        // avatar.mouth().setWeight(10);
 
         // Stop idle motion
         ESP_LOGW(TAG, "Stop idle motion");
@@ -363,12 +432,6 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
         // Return to default pose
         auto& motion = GetStackChan().motion();
         motion.pitchServo().moveWithSpeed(0, 80);
-
-    } else if (strcmp(emotion, "doubtful") == 0) {
-        avatar.setEmotion(Emotion::Doubt);
-    } else {
-        ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
-        avatar.setEmotion(Emotion::Neutral);
     }
 
     // Resync blink modifier base eye weights
@@ -503,8 +566,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             speaking_modifier_id_ = -1;
         }
 
-        GetHAL().setRgbColor(0, 0, 50, 0);
-        GetHAL().refreshRgb();
+        set_status_light(0, 50, 0);
 
     } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
         _is_xiaozhi_ready = true;
@@ -518,16 +580,14 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
         is_idle = true;
 
-        GetHAL().setRgbColor(0, 0, 0, 0);
-        GetHAL().refreshRgb();
+        set_status_light(0, 0, 0);
 
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
         if (speaking_modifier_id_ < 0) {
             speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, false));
         }
 
-        GetHAL().setRgbColor(0, 0, 0, 50);
-        GetHAL().refreshRgb();
+        set_status_light(0, 0, 50);
     } else {
         avatar.setSpeech(status);
     }

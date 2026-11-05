@@ -11,6 +11,132 @@ config STACKCHAN_SERVER_URL
 
 endmenu
 
+menu "StackChan Control API"
+
+config STACKCHAN_CONTROL_SERVER
+    bool "Enable the LAN control API"
+    default y
+    help
+        A small REST server exposing the same robot primitives hal_mcp.cpp
+        gives the assistant backend: head angles, LEDs, emotion, speech
+        bubble, and a status read.
+
+        Lets tooling on your own network drive the device without going
+        through the cloud. See main/hal/hal_control_server.cpp.
+
+config STACKCHAN_CONTROL_PORT
+    int "Control API port"
+    default 8080
+    range 1024 65535
+    depends on STACKCHAN_CONTROL_SERVER
+
+config STACKCHAN_CONTROL_TOKEN
+    string "Shared token (blank = no auth)"
+    default ""
+    depends on STACKCHAN_CONTROL_SERVER
+    help
+        When set, every request must carry it in an X-StackChan-Token header.
+
+        Left blank, anything on your LAN can move the servos and change the
+        face. That is fine on a trusted network and a bad idea otherwise.
+        Put real values in sdkconfig.defaults.local, not a committed defconfig.
+
+endmenu
+
+menu "StackChan Hardware"
+
+config STACKCHAN_CAMERA
+    bool "Start the camera at boot"
+    default n
+    help
+        The camera takes about 36 KB of internal RAM from boot whether or not
+        anything looks through it, and internal RAM is what this board runs out
+        of (measured 4 Nov 2026: Wi-Fi failing to allocate, activation never
+        finishing). Off until something can start it on demand.
+
+config STACKCHAN_LOOK_TEST
+    bool "Look test: camera on, Xiaozhi off"
+    default n
+    depends on STACKCHAN_CAMERA
+    help
+        Boots the face, Wi-Fi, control server and camera without Xiaozhi, which
+        is what it takes for the camera to fit. GET /api/photo returns a JPEG.
+        No voice in this mode.
+
+endmenu
+
+menu "StackChan Tailnet"
+
+config STACKCHAN_TAILNET
+    bool "Join a Tailscale tailnet (microlink)"
+    default n
+    # Noise (control) and WireGuard both need ChaCha20-Poly1305 and HKDF, which
+    # this project's mbedTLS leaves out; microlink fails to link without them.
+    select MBEDTLS_CHACHA20_C
+    select MBEDTLS_POLY1305_C
+    select MBEDTLS_CHACHAPOLY_C
+    select MBEDTLS_HKDF_C
+    help
+        Bring up a Tailscale-compatible WireGuard tunnel on the device using
+        microlink (https://github.com/CamM2325/microlink), fetched into
+        third-party/microlink by fetch_repos.py.
+
+        When disabled the microlink and wireguard_lwip components are excluded
+        from the build entirely, so the firmware is byte-identical to a tree
+        without them.
+
+        NOTE: microlink exposes its own socket API rather than an lwIP netif,
+        so this does NOT transparently move the Xiaozhi voice websocket onto
+        the tailnet. It gives new, purpose-written code a tailnet-reachable
+        path. To put the assistant itself behind a tailnet, run a subnet
+        router or reverse proxy on your LAN and point CONFIG_OTA_URL at it.
+
+config STACKCHAN_TAILNET_AUTH_KEY
+    string "Tailnet auth key"
+    default ""
+    depends on STACKCHAN_TAILNET
+    help
+        Reusable auth key from your Tailscale, Headscale or Ionscale admin.
+
+        Put this in sdkconfig.defaults.local (git-ignored), never in a
+        committed defconfig. scan_secrets.py exists for a reason.
+
+config STACKCHAN_TAILNET_DEVICE_NAME
+    string "Tailnet device name"
+    default "stackchan"
+    depends on STACKCHAN_TAILNET
+    help
+        Hostname this device claims on the tailnet.
+
+config STACKCHAN_TAILNET_ENABLE_DERP
+    bool "Enable DERP relay fallback"
+    default y
+    depends on STACKCHAN_TAILNET
+    help
+        Relay through DERP when direct UDP hole punching fails. Costs memory
+        but is what makes the device work on networks you do not control.
+        Turn it off only if the device never leaves a known-good LAN.
+
+config STACKCHAN_TAILNET_MAX_PEERS
+    int "Maximum tailnet peers"
+    default 8
+    range 1 64
+    depends on STACKCHAN_TAILNET
+    help
+        Peer slots to allocate. Each one costs memory, so keep it close to the
+        number of machines this device actually talks to.
+
+config STACKCHAN_TAILNET_BLOCK_BOOT
+    bool "Wait for the tunnel before continuing boot"
+    default n
+    depends on STACKCHAN_TAILNET
+    help
+        When disabled (default) the tunnel is brought up in the background and
+        a failure is logged and ignored, so the voice assistant still works
+        with no tailnet. Enable only if the device is useless without it.
+
+endmenu
+
 menu "Xiaozhi Assistant"
 
 config OTA_URL

@@ -82,10 +82,20 @@ private:
 
             stackchan.avatar().removeDecorator(_dizzy_decorator_id);
             stackchan.avatar().removeDecorator(_shy_decorator_id);
-            _dizzy_decorator_id =
-                stackchan.avatar().addDecorator(std::make_unique<avatar::DizzyDecorator>(lv_screen_active(), 0, 300));
-            _shy_decorator_id =
-                stackchan.avatar().addDecorator(std::make_unique<avatar::ShyDecorator>(lv_screen_active(), 0));
+            auto& av            = stackchan.avatar();
+            _dizzy_decorator_id = av.addNamedDecorator("dizzy");
+            if (_dizzy_decorator_id < 0) {
+                _dizzy_decorator_id =
+                    av.addDecorator(std::make_unique<avatar::DizzyDecorator>(lv_screen_active(), 0, 300));
+            }
+
+            _shy_decorator_id = av.addNamedDecorator("blush");
+            if (_shy_decorator_id < 0) {
+                _shy_decorator_id = av.addNamedDecorator("shy");
+            }
+            if (_shy_decorator_id < 0) {
+                _shy_decorator_id = av.addDecorator(std::make_unique<avatar::ShyDecorator>(lv_screen_active(), 0));
+            }
         }
 
         // 刷新恢复时间和切换时间

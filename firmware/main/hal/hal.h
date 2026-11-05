@@ -77,18 +77,6 @@ enum class CommonLogLevel {
  * @brief
  *
  */
-namespace app_center {
-
-struct AppInfo_t {
-    std::string name;
-    std::string iconUrl;
-    std::string description;
-    std::string firmwareUrl;
-};
-
-using AppInfoList_t = std::vector<AppInfo_t>;
-
-};  // namespace app_center
 
 /**
  * @brief
@@ -108,6 +96,21 @@ enum class WifiStatus {
 struct UserAccountInfo_t {
     std::string username;
     std::string deviceName;
+};
+
+/**
+ * @brief
+ *
+ */
+/**
+ * @brief Tailnet (microlink) state. All zero when CONFIG_STACKCHAN_TAILNET is off.
+ *
+ */
+struct TailnetStatus_t {
+    bool connected = false;
+    int state      = 0;  // microlink_state_t
+    int peerCount  = 0;
+    std::string address;
 };
 
 /**
@@ -262,12 +265,6 @@ public:
     void setTimezone(std::string_view tz);
     std::string getTimezone();
 
-    /* --------------------------------- EspNow --------------------------------- */
-    uitk::Signal<const std::vector<uint8_t>&> onEspNowData;
-    bool startEspNow(int channel);
-    bool espNowSend(const std::vector<uint8_t>& data, const uint8_t* destAddr = nullptr);
-    void setLaserEnabled(bool enabled);
-
     /* ------------------------------- Warm Reboot ------------------------------ */
     void requestWarmReboot(int appIndex);
     int getWarmRebootTarget();
@@ -280,13 +277,22 @@ public:
     WifiStatus getWifiStatus();
     void startSntp();
 
-    /* -------------------------------- App center ------------------------------- */
-    app_center::AppInfoList_t fetchAppList();
-    void launchApp(std::string_view url, std::function<void(int)> onProgress);
+    /* ------------------------------ Control API ------------------------------- */
+    // No-ops unless CONFIG_STACKCHAN_CONTROL_SERVER is enabled.
+    void startControlServer();
+    void stopControlServer();
 
-    /* --------------------------------- EzData --------------------------------- */
-    void startEzDataService(std::function<void(std::string_view)> onStartLog);
-    uitk::Signal<std::string_view> onEzdataPairCode;
+    /* --------------------------------- Tailnet -------------------------------- */
+    // No-ops unless CONFIG_STACKCHAN_TAILNET is enabled, so callers need no #ifdef.
+    void startTailnet(std::function<void(std::string_view)> onLog = nullptr);
+    // For the Xiaozhi path: returns at once, waits for the clock on its own task.
+    void startTailnetWhenReady();
+
+    /* -------------------------------- Look test ------------------------------- */
+    // Only with CONFIG_STACKCHAN_LOOK_TEST: the face and the network, no Xiaozhi. Never returns.
+    void runLookTest();
+    void stopTailnet();
+    TailnetStatus_t getTailnetStatus();
 
     /* ------------------------------- User Acount ------------------------------ */
     UserAccountInfo_t getUserAccountInfo();

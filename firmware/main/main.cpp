@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include <sdkconfig.h>
 #include <smooth_ui_toolkit.hpp>
 #include <uitk/short_namespace.hpp>
 #include <mooncake_log.h>
@@ -23,6 +24,10 @@ extern "C" void app_main(void)
     // HAL init
     GetHAL().init();
 
+#ifdef CONFIG_STACKCHAN_LOOK_TEST
+    GetHAL().runLookTest();  // never returns
+#endif
+
     // Setup ui hal
     ui_hal::on_delay([](uint32_t ms) { GetHAL().delay(ms); });
     ui_hal::on_get_tick([]() { return GetHAL().millis(); });
@@ -35,12 +40,6 @@ extern "C" void app_main(void)
         hal_toggles::register_app_id(hal_toggles::App::AiAgent,
                                      GetMooncake().installApp(std::make_unique<AppAiAgent>()));
         hal_toggles::register_app_id(hal_toggles::App::Avatar, GetMooncake().installApp(std::make_unique<AppAvatar>()));
-        hal_toggles::register_app_id(hal_toggles::App::EspnowRemote,
-                                     GetMooncake().installApp(std::make_unique<AppEspnowControl>()));
-        hal_toggles::register_app_id(hal_toggles::App::AppCenter,
-                                     GetMooncake().installApp(std::make_unique<AppAppCenter>()));
-        hal_toggles::register_app_id(hal_toggles::App::Ezdata, GetMooncake().installApp(std::make_unique<AppEzdata>()));
-        hal_toggles::register_app_id(hal_toggles::App::Dance, GetMooncake().installApp(std::make_unique<AppDance>()));
         GetMooncake().installApp(std::make_unique<AppSetup>());
 
         // Main loop

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal.h"
+#include "sd_assets.h"
+#include "ram_map.h"
 #include <memory>
 #include <mooncake_log.h>
 #include <nvs_flash.h>
@@ -23,6 +25,8 @@ Hal& GetHAL()
 void Hal::init()
 {
     mclog::tagInfo(_tag, "init");
+    ram_map::start_log_capture();
+    ram_map::mark("hal init");
 
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -32,14 +36,28 @@ void Hal::init()
     }
     ESP_ERROR_CHECK(ret);
 
+    // Must run before the display claims SPI3: the card's MISO and the LCD's
+    // Data/Command line are the same pin (GPIO 35). See hal/hal_sdcard.cpp.
+    sd_assets::load();
+    ram_map::mark("sd assets");
+
     xiaozhi_board_init();
+    ram_map::mark("board up");
+
+    // Binds to IP_EVENT; fires whether mooncake or xiaozhi brings WiFi up.
+    startControlServer();
+    ram_map::mark("control server");
     xiaozhi_mcp_init();
+    ram_map::mark("mcp");
     head_touch_init();
     io_expander_init();
     rtc_init();
     imu_init();
+    ram_map::mark("touch, io, rtc, imu");
     servo_init();
+    ram_map::mark("servos");
     lvgl_init();
+    ram_map::mark("hal done");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -165,7 +183,10 @@ static void _stackchan_update_task(void* param)
 
         if (!is_setup_done) {
             // Setup when xiaozhi ready
+            ram_map::mark("xiaozhi ready");
             GetHAL().startSntp();
+            // Xiaozhi brings the network up itself and never calls startNetwork().
+            GetHAL().startTailnetWhenReady();
             view::create_home_indicator([]() { GetHAL().requestWarmReboot(0); }, 0x81DBBD, 0x134233);
             view::create_status_bar(0x81DBBD, 0x134233);
             is_setup_done = true;
@@ -175,6 +196,20 @@ static void _stackchan_update_task(void* param)
         view::update_status_bar();
     }
 }
+
+#ifdef CONFIG_STACKCHAN_LOOK_TEST
+void Hal::runLookTest()
+{
+    mclog::tagInfo(_tag, "look test: no xiaozhi");
+    hal_bridge::setup_display_ui();
+    xTaskCreatePinnedToCore(_stackchan_update_task, "stackchan", 4096, NULL, 3, NULL, 1);
+    startNetwork(nullptr);
+    ram_map::mark("look test up");
+    while (true) {
+        delay(1000);
+    }
+}
+#endif
 
 void Hal::startXiaozhi()
 {
@@ -199,6 +234,7 @@ void Hal::startXiaozhi()
     // Start stackchan update task
     xTaskCreatePinnedToCore(_stackchan_update_task, "stackchan", 4096, NULL, 3, NULL, 1);
 
+    ram_map::mark("before xiaozhi");
     hal_bridge::start_xiaozhi_app();
 }
 

@@ -109,6 +109,11 @@ void xiaozhi_board_init()
     auto& board = Board::GetInstance();
 }
 
+void setup_display_ui()
+{
+    Board::GetInstance().GetDisplay()->SetupUI();
+}
+
 void start_xiaozhi_app()
 {
     set_xiaozhi_mode(true);
