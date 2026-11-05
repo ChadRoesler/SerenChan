@@ -1,2 +1,4 @@
 .DS_Store
 .idea/
+# this machine's path and the device's LAN address
+.mcp.json
