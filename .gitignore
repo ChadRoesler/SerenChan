@@ -2,3 +2,9 @@
 .idea/
 # this machine's path and the device's LAN address
 .mcp.json
+
+# the voice server's environment, token and recordings
+seren-voice/.venv/
+seren-voice/state/
+tools/
+seren-voice/__pycache__/
