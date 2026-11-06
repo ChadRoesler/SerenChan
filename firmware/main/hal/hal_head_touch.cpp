@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal.h"
+#include "touch_log.h"
+#include <atomic>
+#include <cstdio>
+#include <esp_heap_caps.h>
 #include "drivers/Si12T/Si12T.h"
 #include "board/hal_bridge.h"
 #include <mooncake_log.h>
@@ -115,6 +119,55 @@ private:
     int16_t initial_position;
 };
 
+// ---------------------------------------------------------------- the raw feed
+namespace {
+struct TouchSample_t {
+    uint32_t ms;
+    uint8_t zones[3];
+    uint8_t gesture;
+};
+constexpr uint32_t kTouchSamples = 2048;
+TouchSample_t* _touch_samples    = nullptr;
+std::atomic<uint32_t> _touch_count{0};  // the sensor task and the screen both add
+}  // namespace
+
+void touch_log::add(uint32_t ms, const uint8_t zones[3], int gesture)
+{
+    if (_touch_samples == nullptr) {
+        _touch_samples = static_cast<TouchSample_t*>(heap_caps_malloc(kTouchSamples * sizeof(TouchSample_t), MALLOC_CAP_SPIRAM));
+        if (_touch_samples == nullptr) {
+            return;
+        }
+    }
+    TouchSample_t& s = _touch_samples[_touch_count.fetch_add(1) % kTouchSamples];
+    s.ms             = ms;
+    s.zones[0]       = zones[0];
+    s.zones[1]       = zones[1];
+    s.zones[2]       = zones[2];
+    s.gesture        = static_cast<uint8_t>(gesture);
+}
+
+size_t touch_log::read(uint32_t since_ms, char* out, size_t capacity)
+{
+    if (_touch_samples == nullptr) {
+        return 0;
+    }
+    const uint32_t count = _touch_count.load();
+    size_t used          = 0;
+    for (uint32_t i = count > kTouchSamples ? count - kTouchSamples : 0; i < count; i++) {
+        const TouchSample_t& s = _touch_samples[i % kTouchSamples];
+        if (s.ms <= since_ms) {
+            continue;
+        }
+        if (capacity - used < 40) {
+            break;
+        }
+        used += std::snprintf(out + used, capacity - used, "%lu %u %u %u %u\n", (unsigned long)s.ms, s.zones[0], s.zones[1],
+                              s.zones[2], s.gesture);
+    }
+    return used;
+}
+
 static void _head_touch_update_task(void* param)
 {
     mclog::tagInfo(_tag, "start update task");
@@ -136,6 +189,12 @@ static void _head_touch_update_task(void* param)
 
         // Update and fire event
         gesture = recognizer.update(data);
+        // the reading after a touch ends is kept too, so a touch's length can be measured
+        static bool was_touched = false;
+        if (data.is_touched() || was_touched || gesture != HeadPetGesture::None) {
+            touch_log::add(GetHAL().millis(), data.intensity, static_cast<int>(gesture));
+        }
+        was_touched = data.is_touched();
         if (gesture != HeadPetGesture::None) {
             GetHAL().onHeadPetGesture.emit(gesture);
         }

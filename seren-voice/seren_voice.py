@@ -25,6 +25,8 @@ import av
 import numpy as np
 from aiohttp import ClientSession, ClientTimeout, FormData, WSMsgType, web
 
+from touch_read import TouchReader, reaction_for
+
 log = logging.getLogger("seren-voice")
 HERE = Path(__file__).resolve().parent
 STATE = HERE / "state"
@@ -36,6 +38,8 @@ IN_RATE = 16000       # what the device sends
 OUT_RATE = 24000      # what we send it
 FRAME_MS = 60
 
+LIVE_S = 180          # words this recent mean a call back is a reply, not me barging in
+REPLY_WINDOW_S = 10   # how long a call back stays open for his answer
 SPEECH_RMS = 500      # 16-bit RMS above this is speech; tune against a real room
 END_SILENCE_MS = 900  # this much quiet after speech ends an utterance
 MIN_SPEECH_MS = 300   # shorter than this was a noise
@@ -123,6 +127,8 @@ class Device:
         self.decoder.layout = "mono"
         self.resampler = av.AudioResampler(format="s16", layout="mono", rate=IN_RATE)
         self.speaking = False
+        self.ready = False                  # its hello has been answered
+        self.deaf = False                   # opened by me to say something: what the mic hears is dropped
         self.last_words = time.monotonic()  # the channel hangs up after too long without any
         self.reset()
 
@@ -171,6 +177,9 @@ class Link:
         self.device: Device | None = None
         self.http: ClientSession | None = None
         self.say_lock = asyncio.Lock()
+        self.saying = 0      # replies being rendered or spoken: the channel stays up for them
+        self.last_heard = 0.0  # when Chad last said real words: within LIVE_S, we're mid-conversation
+        self.waking = False
         HEARD_DIR.mkdir(parents=True, exist_ok=True)
 
     def lodestar_headers(self):
@@ -214,6 +223,7 @@ class Link:
         with HEARD_LOG.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         log.info("heard (%ss): %s", entry["seconds"], text)
+        self.last_heard = time.monotonic()
         d = self.device
         if d is not None and text:
             d.last_words = time.monotonic()
@@ -222,9 +232,40 @@ class Link:
     async def send(self, d: Device, message: dict):
         await d.ws.send_str(json.dumps({"session_id": d.session_id, **message}))
 
-    async def say(self, text: str, voice: str, emotion: str | None):
+    async def wake_device(self):
+        """Open the channel from this end. It stays deaf, and hangs up after the line: I can get
+        Chad's attention without the mic listening to a room he didn't open it in."""
+        token_path = STATE / "control_token"
+        headers = {"X-StackChan-Token": token_path.read_text(encoding="utf-8").strip()} if token_path.exists() else {}
+        self.waking = True
+        try:
+            async with self.http.post(f"http://{self.args.device}:8080/api/wake", headers=headers, data=b"{}",
+                                      timeout=ClientTimeout(total=6)) as r:
+                if r.status != 200:
+                    raise web.HTTPConflict(text=f"the robot wouldn't wake: {r.status} {(await r.text())[:120]}")
+            end = time.monotonic() + 12
+            while self.device is None or not self.device.ready:
+                if time.monotonic() > end:
+                    raise web.HTTPGatewayTimeout(text="the robot didn't open its channel")
+                await asyncio.sleep(0.1)
+        finally:
+            self.waking = False
+
+    async def say(self, text: str, voice: str, emotion: str | None, wake: bool = False):
+        self.saying += 1
+        try:
+            return await self._say(text, voice, emotion, wake)
+        finally:
+            self.saying -= 1
+
+    async def _say(self, text: str, voice: str, emotion: str | None, wake: bool):
+        # the words first: rendering is the slow part, so the channel is open for as short a time as can be
         wav = await self.speak_wav(text, voice)
         packets = await asyncio.to_thread(wav_to_opus, wav)
+        woke = False
+        if self.device is None and wake:
+            await self.wake_device()
+            woke = True
         async with self.say_lock:
             d = self.device
             if d is None:
@@ -234,7 +275,8 @@ class Link:
                 await self.send(d, {"type": "tts", "state": "start"})
                 if emotion:
                     await self.send(d, {"type": "llm", "emotion": emotion, "text": ""})
-                await self.send(d, {"type": "tts", "state": "sentence_start", "text": text})
+                # no text: spoken out loud, the words need no bubble, and Chad's art gets the screen
+                await self.send(d, {"type": "tts", "state": "sentence_start"})
                 started = time.monotonic()
                 for i, packet in enumerate(packets):
                     if not d.speaking:
@@ -252,6 +294,14 @@ class Link:
                 d.speaking = False
                 d.last_words = time.monotonic()
                 d.reset()
+            if woke or d.deaf:
+                if time.monotonic() - self.last_heard < LIVE_S:
+                    # he's talking to me: stay for his answer, then the usual hang-up applies
+                    d.deaf = False
+                    d.last_words = time.monotonic() - max(0, self.args.idle_close - REPLY_WINDOW_S)
+                else:
+                    await asyncio.sleep(0.5)    # the tail of the audio, still in the device's queue
+                    await d.ws.close()
         return len(packets) * FRAME_MS / 1000
 
     # -- routes ---------------------------------------------------------------------------
@@ -271,12 +321,13 @@ class Link:
         ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024, heartbeat=None)
         await ws.prepare(request)
         d = Device(ws, secrets.token_hex(4))
+        d.deaf = self.waking      # set before anything can arrive from this device
         self.device = d
         log.info("device connected: %s", request.headers.get("Device-Id", "?"))
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.BINARY:
-                    if d.speaking:
+                    if d.speaking or d.deaf:
                         continue
                     done = d.feed(msg.data)
                     if done is not None:
@@ -299,6 +350,7 @@ class Link:
                 "type": "hello", "transport": "websocket", "session_id": d.session_id,
                 "audio_params": {"format": "opus", "sample_rate": OUT_RATE, "channels": 1, "frame_duration": FRAME_MS},
             }))
+            d.ready = True
         elif kind == "listen":
             log.info("listen: %s %s", m.get("state"), m.get("text", ""))
             if m.get("state") == "start":
@@ -321,7 +373,7 @@ class Link:
         text = (body.get("text") or "").strip()
         if not text:
             raise web.HTTPBadRequest(text="no text")
-        seconds = await self.say(text, body.get("voice") or self.args.voice, body.get("emotion"))
+        seconds = await self.say(text, body.get("voice") or self.args.voice, body.get("emotion"), bool(body.get("wake")))
         return web.json_response({"ok": True, "seconds": seconds})
 
     async def status(self, request):
@@ -330,31 +382,62 @@ class Link:
                                   "speaking": bool(self.device and self.device.speaking)})
 
     async def watch_touch(self):
-        """Poll the device's head touch counters and log each new pat, so I can feel them."""
-        url = f"http://{self.args.device}:8080/api/touch"
-        pats = presses = None
+        """Read the head sensor's raw feed and log what the hand is doing, so I can feel it:
+        each touch, and a summary of each session once the hand has gone away (touch_read.py)."""
+        base = f"http://{self.args.device}:8080/api"
+        token_path = STATE / "control_token"
+        headers = {"X-StackChan-Token": token_path.read_text(encoding="utf-8").strip()} if token_path.exists() else {}
+        reader = TouchReader()
+        since = 0
+        uptime = None       # the robot's clock, and when it was read
+        read_at = 0.0
+
+        def write(entry):
+            with TOUCH_LOG.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"t": time.time(), **entry}) + "\n")
+
         while True:
             await asyncio.sleep(1.0)
             try:
-                async with self.http.get(url, timeout=ClientTimeout(total=4)) as r:
-                    t = await r.json(content_type=None)
+                if uptime is None or time.monotonic() - read_at > 5:
+                    async with self.http.get(f"{base}/status", headers=headers, timeout=ClientTimeout(total=4)) as r:
+                        now_up = (await r.json(content_type=None))["uptimeMs"]
+                    if uptime is None:      # first look: what's already in the feed happened before this server
+                        since = now_up
+                    elif now_up < since:    # the robot rebooted, and its clock with it
+                        reader.reset()
+                        since = 0
+                    uptime, read_at = now_up, time.monotonic()
+                async with self.http.get(f"{base}/touch-raw?since={since}", headers=headers,
+                                         timeout=ClientTimeout(total=4)) as r:
+                    text = await r.text() if r.status == 200 else ""
             except Exception:
                 continue
-            if pats is not None and (t["pats"] < pats or t["presses"] < presses):
-                pats = presses = None  # the device rebooted
-            if pats is not None and (t["pats"] > pats or t["presses"] > presses):
-                entry = {"t": time.time(), "new_pats": t["pats"] - pats, "new_presses": t["presses"] - presses}
-                with TOUCH_LOG.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(entry) + "\n")
-                log.info("touched: %s", entry)
-            pats, presses = t["pats"], t["presses"]
+            rows = [tuple(int(x) for x in line.split()) for line in text.splitlines() if len(line.split()) == 5]
+            if rows:
+                since = rows[-1][0]
+            events, sessions = reader.feed(rows, now_ms=uptime + int((time.monotonic() - read_at) * 1000))
+            for e in events:
+                write(e)
+            # only the last one: a burst shouldn't queue up a parade of faces
+            react = reaction_for(events[-1]) if events else None
+            if react:
+                try:
+                    async with self.http.post(f"{base}/react", headers=headers, json={"name": react[0], "ms": react[1]},
+                                              timeout=ClientTimeout(total=4)) as r:
+                        await r.read()
+                except Exception:
+                    pass
+            for s in sessions:
+                write({"session": s})
+                log.info("touched: %s", s)
 
     async def watch_silence(self):
         """Hang up when nobody has said a word for a while, so a forgotten tap can't leave the mic open."""
         while True:
             await asyncio.sleep(1.0)
             d = self.device
-            if d is None or d.speaking or self.say_lock.locked():
+            if d is None or d.speaking or self.saying or self.say_lock.locked():
                 continue
             if time.monotonic() - d.last_words >= self.args.idle_close:
                 log.info("no words for %ss: closing the channel", self.args.idle_close)

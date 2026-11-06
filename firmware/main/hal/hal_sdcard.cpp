@@ -27,6 +27,7 @@
  * running firmware idles at roughly 42 KB free internal heap.
  */
 #include "sd_assets.h"
+#include "face_push.h"
 #include <mooncake_log.h>
 #include <driver/gpio.h>
 #include <driver/spi_common.h>
@@ -292,6 +293,7 @@ bool sd_assets::load()
         // No card, wrong format, or no reader. All non-fatal: the firmware
         // falls back to the assets partition.
         mclog::tagInfo(_tag, "no usable SD card ({}), using the assets partition", esp_err_to_name(err));
+        face_push::note_no_card();
         spi_bus_free(kSpiHost);
         return false;
     }
@@ -300,6 +302,7 @@ bool sd_assets::load()
                    static_cast<uint32_t>(((uint64_t)card->csd.capacity * card->csd.sector_size) / (1024 * 1024)));
 
     apply_wifi_file();
+    face_push::apply_to_card();
 
     size_t total = 0;
     DIR* dir     = opendir(kFaceDir);

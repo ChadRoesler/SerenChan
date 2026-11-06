@@ -676,6 +676,22 @@ private:
     }
 
 public:
+    StackChanCamera* OpenCamera()
+    {
+        if (camera_ == nullptr) {
+            InitializeCamera();
+        }
+        return camera_;
+    }
+
+    void CloseCamera()
+    {
+#ifndef CONFIG_STACKCHAN_CAMERA  // on at boot means it stays on
+        delete camera_;
+        camera_ = nullptr;
+#endif
+    }
+
     M5StackCoreS3Board()
     {
         ram_map::mark("board start");
@@ -763,6 +779,31 @@ i2c_master_bus_handle_t hal_bridge::board_get_i2c_bus()
 {
     auto& board = (M5StackCoreS3Board&)Board::GetInstance();
     return board.GetI2cBus();
+}
+
+// The red light: the second LED of each strip, so it can show beside the mic or reply light.
+static void set_camera_light(bool on)
+{
+    const uint8_t red = on ? 50 : 0;
+    GetHAL().setRgbColor(1, red, 0, 0);
+    GetHAL().setRgbColor(7, red, 0, 0);
+    GetHAL().refreshRgb();
+}
+
+StackChanCamera* hal_bridge::camera_open()
+{
+    set_camera_light(true);  // before the sensor, so nothing is ever seen without it
+    auto camera = ((M5StackCoreS3Board&)Board::GetInstance()).OpenCamera();
+    if (camera == nullptr) {
+        set_camera_light(false);
+    }
+    return camera;
+}
+
+void hal_bridge::camera_close()
+{
+    ((M5StackCoreS3Board&)Board::GetInstance()).CloseCamera();
+    set_camera_light(false);  // after the sensor, for the same reason
 }
 
 StackChanCamera* hal_bridge::board_get_camera()

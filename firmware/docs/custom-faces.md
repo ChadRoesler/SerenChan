@@ -235,6 +235,20 @@ all-emotions sheet. `build` is still `face.py`'s job.
 
 ---
 
+### Sending a face to the robot
+
+Face Studio's **Robot** panel puts a face on the device without touching the
+microSD card. Give it the robot's address, and the control token if the firmware
+was built with one (`CONFIG_STACKCHAN_CONTROL_TOKEN`).
+
+- **Try this pose** shows the pose, and its twitch, using the face already there.
+- **Send this face** saves, builds, uploads and reboots, in about 45 seconds. The
+  upload waits in flash, and early boot copies it onto the card, because the card
+  can't be written once the display is running. The old face stays as `face_old`.
+- **Previous face** swaps `face` and `face_old`.
+
+The studio keeps the address and token in `~/.face_studio.json`.
+
 ## face.yaml reference
 
 ```yaml
@@ -304,6 +318,20 @@ Anything referencing a part you have not drawn degrades to something that
 exists, so a partial face still renders. The build prints what it substituted.
 
 ---
+
+### Motion per pose
+
+A pose can carry motion of its own, which runs while it holds:
+
+```yaml
+emotions:
+  angry: {motion: {twitch: {eye: right, lid: closed, every: [2500, 6000], flutters: 3}}}
+```
+
+`eye` is `left`, `right` or `both`. `lid` is any upper lid you've drawn: the eye
+flicks to that drawing and back `flutters` times, 70 ms a flick, then pauses for a
+random time between the two `every` values, in milliseconds. A lid that isn't
+drawn means no twitch, with a warning at build time.
 
 ## Emotions
 

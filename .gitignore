@@ -6,5 +6,11 @@
 # the voice server's environment, token and recordings
 seren-voice/.venv/
 seren-voice/state/
-tools/
 seren-voice/__pycache__/
+
+# the workbench at the root only; a bare tools/ also swallowed firmware/tools, which is Face Studio
+/tools/
+firmware/tools/__pycache__/
+
+# Chad's face art: big, and this repo is public. Un-ignore on purpose, not by accident.
+/wrenFace/

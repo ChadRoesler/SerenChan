@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "custom.h"
+#include "../../../utils/random.h"
 #include <assets/assets.h>
 #include <mooncake_log.h>
 #include <esp_heap_caps.h>
@@ -350,6 +351,13 @@ bool CustomAvatar::setEmotionByName(const std::string& emotion)
     _emotion         = Emotion::Neutral;
     _current_emotion = emotion;
 
+    // the lids below are about to be set anyway, so a twitch mid-flick needs no undoing
+    _pose              = pose;
+    _twitch            = pose->twitch;
+    _twitch_next       = 0;
+    _twitch_flips_left = 0;
+    _twitch_shown      = false;
+
     if (_key_elements.leftEye) {
         auto* eye = static_cast<EyeRig*>(_key_elements.leftEye.get());
         eye->applyLids(pose->upperLidLeft.empty() ? pose->upperLid : pose->upperLidLeft,
@@ -376,6 +384,83 @@ bool CustomAvatar::setEmotionByName(const std::string& emotion)
     applyBackdrop(*pose);
     applyDecorators(pose->decorators);
     return true;
+}
+
+void CustomAvatar::react(const std::string& emotion, uint32_t ms)
+{
+    if (_manifest.pose(emotion) == nullptr) {
+        return;
+    }
+    // boop twice and the second one goes back to the same place as the first
+    if (_react_timer == nullptr) {
+        _react_back = _current_emotion;
+    }
+    setEmotionByName(emotion);
+    _react_name = emotion;
+    if (_react_timer != nullptr) {
+        lv_timer_set_period(_react_timer, ms);
+        lv_timer_reset(_react_timer);
+        return;
+    }
+    _react_timer = lv_timer_create(
+        [](lv_timer_t* timer) {
+            auto* self         = static_cast<CustomAvatar*>(lv_timer_get_user_data(timer));
+            self->_react_timer = nullptr;  // a repeat count of 1 deletes the timer after this
+            // if something else set a pose meanwhile, that wins
+            if (self->_current_emotion == self->_react_name) {
+                self->setEmotionByName(self->_react_back.empty() ? "neutral" : self->_react_back);
+            }
+        },
+        ms, this);
+    lv_timer_set_repeat_count(_react_timer, 1);
+}
+
+void CustomAvatar::showTwitchLid(bool shown)
+{
+    if (_pose == nullptr) {
+        return;
+    }
+    const bool both = _twitch.eye == "both";
+    if (_key_elements.leftEye && (both || _twitch.eye == "left")) {
+        static_cast<EyeRig*>(_key_elements.leftEye.get())
+            ->applyLids(shown ? _twitch.lid : (_pose->upperLidLeft.empty() ? _pose->upperLid : _pose->upperLidLeft),
+                        _pose->lowerLidLeft.empty() ? _pose->lowerLid : _pose->lowerLidLeft);
+    }
+    if (_key_elements.rightEye && (both || _twitch.eye == "right")) {
+        static_cast<EyeRig*>(_key_elements.rightEye.get())
+            ->applyLids(shown ? _twitch.lid : (_pose->upperLidRight.empty() ? _pose->upperLid : _pose->upperLidRight),
+                        _pose->lowerLidRight.empty() ? _pose->lowerLid : _pose->lowerLidRight);
+    }
+}
+
+void CustomAvatar::setTwitch(const PoseTwitch_t& twitch)
+{
+    if (_twitch_shown) {
+        showTwitchLid(false);
+    }
+    _twitch            = twitch;
+    _twitch_next       = 0;
+    _twitch_flips_left = 0;
+    _twitch_shown      = false;
+}
+
+void CustomAvatar::tickMotion(uint32_t nowMs)
+{
+    constexpr uint32_t kFlickMs = 70;
+    if (!_twitch.on || static_cast<int32_t>(nowMs - _twitch_next) < 0) {
+        return;
+    }
+    if (_twitch_flips_left <= 0) {
+        // there and back for each flick, so it always lands on the pose's own lid
+        _twitch_flips_left = _twitch.flutters * 2;
+        _twitch_count++;
+    }
+    _twitch_shown = !_twitch_shown;
+    showTwitchLid(_twitch_shown);
+    _twitch_flips_left--;
+    _twitch_next = nowMs + (_twitch_flips_left > 0
+                                ? kFlickMs
+                                : Random::getInstance().getInt(_twitch.everyMinMs, std::max(_twitch.everyMinMs, _twitch.everyMaxMs)));
 }
 
 void CustomAvatar::setEmotion(const Emotion& emotion)

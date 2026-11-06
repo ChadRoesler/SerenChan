@@ -347,6 +347,17 @@ FaceManifest_t FaceManifest_t::load()
             pose.overlaySet = node["overlay"].is<const char*>();
             pose.overlay    = read_string(node["overlay"]);
 
+            auto twitch = node["motion"]["twitch"];
+            if (twitch.is<ArduinoJson::JsonObject>()) {
+                pose.twitch.on   = true;
+                pose.twitch.eye  = read_string(twitch["eye"], "right");
+                pose.twitch.lid  = read_string(twitch["lid"], "closed");
+                auto every       = read_point(twitch["every"], Vector2i{2500, 6000});
+                pose.twitch.everyMinMs = every.x;
+                pose.twitch.everyMaxMs = every.y;
+                pose.twitch.flutters   = clamp(read_int(twitch["flutters"], 3), 1, 10);
+            }
+
             manifest.emotions.emplace(kv.key().c_str(), std::move(pose));
         }
     }

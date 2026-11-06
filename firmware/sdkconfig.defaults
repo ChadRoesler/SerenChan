@@ -61,6 +61,9 @@ CONFIG_MBEDTLS_SSL_RENEGOTIATION=n
 CONFIG_LIBC_NEWLIB=y
 # The network SDK uses C99 %zx formatting for HTTP chunk sizes.
 # CONFIG_LIBC_NEWLIB_NANO_FORMAT is not set
+# Half the driver's size: it needs one unbroken block of internal RAM, and only for the moments
+# /api/photo has the camera on. 32 KB doesn't fit beside voice; a 320x240 frame copies fine from this.
+CONFIG_CAM_CTRL_DVP_DMA_BUFFER_SIZE=16384
 CONFIG_CAMERA_GC0308=y
 CONFIG_CAMERA_GC0308_DVP_YUV422_320X240_20FPS=y
 CONFIG_LV_USE_CLIB_MALLOC=y

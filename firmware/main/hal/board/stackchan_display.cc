@@ -17,6 +17,7 @@
 #include <stackchan/stackchan.h>
 #include <assets/lang_config.h>
 #include <hal/hal.h>
+#include <hal/touch_log.h>
 
 using namespace stackchan;
 using namespace stackchan::avatar;
@@ -258,6 +259,27 @@ void StackChanAvatarDisplay::SetupUI()
             return;
         }
         panel->onClick().connect([]() {
+            // Spots on the face that react rather than talk. Measured from Chad's art for now;
+            // /api/log has every tap's position. To become part of face.yaml, since faces differ.
+            lv_point_t at{};
+            if (lv_indev_t* indev = lv_indev_active()) {
+                lv_indev_get_point(indev, &at);
+            }
+            ESP_LOGI(TAG, "tap at %d,%d", (int)at.x, (int)at.y);
+            if (auto* custom = dynamic_cast<CustomAvatar*>(&GetStackChan().avatar())) {
+                const uint8_t none[3] = {0, 0, 0};
+                if (at.x >= 135 && at.x <= 205 && at.y >= 105 && at.y <= 155) {
+                    custom->react("surprised", 1500);
+                    touch_log::add(GetHAL().millis(), none, touch_log::kBoopNose);
+                    return;
+                }
+                if (at.x >= 105 && at.x <= 215 && at.y >= 30 && at.y <= 72) {
+                    custom->react("loving", 3000);
+                    touch_log::add(GetHAL().millis(), none, touch_log::kKissForehead);
+                    return;
+                }
+            }
+
             static uint32_t last_toggle_tick = 0;
             const uint32_t now               = GetHAL().millis();
             if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {
@@ -295,6 +317,7 @@ void StackChanAvatarDisplay::SetupUI()
     stackchan.attachAvatar(std::move(avatar));
     stackchan.addModifier(std::make_unique<BreathModifier>());
     blink_modifier_id_ = stackchan.addModifier(std::make_unique<BlinkModifier>());
+    stackchan.addModifier(std::make_unique<PoseMotionModifier>());
     stackchan.addModifier(std::make_unique<HeadPetModifier>());
     stackchan.addModifier(std::make_unique<ImuEventModifier>());
 
@@ -557,6 +580,17 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
     bool is_idle      = false;
     bool is_listening = false;
+
+    // The mic art shows for as long as the mic is open, over whatever face is up. A face that
+    // hasn't drawn "microphone" just doesn't show it; the green light still does.
+    static int mic_decorator_id = -1;
+    const bool listening        = strcmp(status, Lang::Strings::LISTENING) == 0;
+    if (listening && mic_decorator_id < 0) {
+        mic_decorator_id = avatar.addNamedDecorator("microphone", 0);
+    } else if (!listening && mic_decorator_id >= 0) {
+        avatar.removeDecorator(mic_decorator_id);
+        mic_decorator_id = -1;
+    }
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
         if (speaking_modifier_id_ >= 0) {

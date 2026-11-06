@@ -6,6 +6,7 @@
 #pragma once
 #include "timed.h"
 #include "blink.h"
+#include "pose_motion.h"
 #include "breath.h"
 #include "speaking.h"
 #include "head_pet.h"

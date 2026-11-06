@@ -88,6 +88,20 @@ private:
  *
  * Produced by the YAML compiler. See firmware/docs/custom-faces.md
  */
+/**
+ * @brief One eye flicking to another lid drawing now and then, while a pose holds
+ *
+ * Swapping drawings rather than nudging a lid works on both rigs and stays pixel art.
+ */
+struct PoseTwitch_t {
+    bool on = false;
+    std::string eye = "right";  // left | right | both (screen sides)
+    std::string lid = "closed"; // an upper lid variant
+    int everyMinMs  = 2500;     // the pause between twitches
+    int everyMaxMs  = 6000;
+    int flutters    = 3;        // flicks in one twitch
+};
+
 struct EmotionPose_t {
     std::string upperLid;
     std::string lowerLid;
@@ -106,6 +120,7 @@ struct EmotionPose_t {
     std::string baseImage;                     // this emotion's own backdrop (the clown)
     bool overlaySet = false;                   // true: overlay below replaces the face's
     std::string overlay;                       // "" with overlaySet = no hair over
+    PoseTwitch_t twitch;
 };
 
 /**
@@ -375,6 +390,18 @@ public:
     /** @brief Event decorators (petting, shaking) drawn from this face. */
     int addNamedDecorator(const std::string& name, uint32_t lifetimeMs = 0) override;
 
+    /** @brief Show a pose for a moment, then go back to what was showing. Unknown names do nothing. */
+    void react(const std::string& emotion, uint32_t ms);
+
+    /** @brief Replace the current pose's twitch, until the next emotion. For trying one out. */
+    void setTwitch(const PoseTwitch_t& twitch);
+    /** @brief Runs the pose's own motion. Driven by PoseMotionModifier. */
+    void tickMotion(uint32_t nowMs);
+    uint32_t twitchCount() const
+    {
+        return _twitch_count;
+    }
+
 private:
     bool _valid = false;
     FaceManifest_t _manifest;
@@ -390,6 +417,18 @@ private:
 
     std::vector<int> _emotion_decorator_ids;
     std::string _current_emotion;
+
+    lv_timer_t* _react_timer = nullptr;
+    std::string _react_name;
+    std::string _react_back;
+
+    const EmotionPose_t* _pose = nullptr;  // std::map keeps it stable
+    PoseTwitch_t _twitch;
+    uint32_t _twitch_next  = 0;
+    int _twitch_flips_left = 0;
+    bool _twitch_shown     = false;
+    uint32_t _twitch_count = 0;
+    void showTwitchLid(bool shown);
 
     uitk::Vector2i anchorFor(const std::string& anchor) const;
     void applyDecorators(const std::vector<std::string>& names);

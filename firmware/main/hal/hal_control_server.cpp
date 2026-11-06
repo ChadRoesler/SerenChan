@@ -17,6 +17,16 @@
  *   POST /api/led     {"r":0,"g":120,"b":80}
  *   POST /api/emotion {"name":"happy"}
  *   POST /api/say     {"text":"hello"}
+ *   GET  /api/photo   a JPEG; the camera is on only for this, red on both sides while it is.
+ *                     ?probe=1 runs the same thing and answers with sizes, no picture leaves.
+ *   GET  /api/touch-raw?since=<ms>  head sensor readings, lines of "ms zone0 zone1 zone2 gesture"
+ *   POST /api/face    a face bundle, X-Face-Crc32: <hex>; it installs on the next boot (face_push.h)
+ *   POST /api/face-restore  on the next boot, put the previous face back
+ *   POST /api/reboot
+ *   POST /api/wake    open the voice channel, the same as a tap, if it's idle
+ *   POST /api/react   {"name":"laughing","ms":2000}: show a pose for a moment, then go back
+ *   POST /api/twitch  {"eye":"right","lid":"closed","every":[2500,6000],"flutters":3}, or {"off":true}
+ *                     tries a twitch on the current pose, until the next emotion
  *
  * Anything touching the avatar or motion runs under LvglLockGuard: the
  * StackChan update task owns those on core 1 and will corrupt without it.
@@ -28,12 +38,17 @@
 #include <atomic>
 #include <cstdio>
 #include <sdkconfig.h>
-#ifdef CONFIG_STACKCHAN_CAMERA
+#include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
+#include <freertos/semphr.h>
 #include "board/hal_bridge.h"
 #include "board/stackchan_camera.h"
 #include <jpg/image_to_jpeg.h>
+#ifdef CONFIG_STACKCHAN_CAMERA
 #endif
 #include "ram_map.h"
+#include "face_push.h"
+#include "touch_log.h"
 #include "hal.h"
 #include <mooncake_log.h>
 #include <sdkconfig.h>
@@ -165,6 +180,18 @@ esp_err_t handle_status(httpd_req_t* req)
     cJSON_AddStringToObject(root, "firmware", FIRMWARE_VERSION);
     cJSON_AddNumberToObject(root, "uptimeMs", static_cast<double>(esp_timer_get_time() / 1000));
     cJSON_AddStringToObject(root, "resetReason", reset_reason_name());
+    if (*face_push::last_result() != '\0') {
+        cJSON_AddStringToObject(root, "facePush", face_push::last_result());
+    }
+    {
+        LvglLockGuard lock;
+        auto& stackchan = GetStackChan();
+        if (stackchan.hasAvatar()) {
+            if (auto* custom = dynamic_cast<avatar::CustomAvatar*>(&stackchan.avatar())) {
+                cJSON_AddNumberToObject(root, "twitches", custom->twitchCount());
+            }
+        }
+    }
     cJSON_AddNumberToObject(root, "batteryLevel", GetHAL().getBatteryLevel());
     cJSON_AddBoolToObject(root, "charging", GetHAL().isBatteryCharging());
     cJSON_AddNumberToObject(root, "freeInternalHeap",
@@ -284,6 +311,354 @@ esp_err_t handle_emotion(httpd_req_t* req)
     return send_json(req, root);
 }
 
+esp_err_t handle_twitch(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+
+    cJSON* body = read_body(req);
+    if (body == nullptr) {
+        return send_error(req, "400 Bad Request", "expected a JSON body");
+    }
+
+    avatar::PoseTwitch_t twitch;
+    twitch.on = !cJSON_IsTrue(cJSON_GetObjectItem(body, "off"));
+    cJSON* eye = cJSON_GetObjectItem(body, "eye");
+    cJSON* lid = cJSON_GetObjectItem(body, "lid");
+    if (cJSON_IsString(eye)) {
+        twitch.eye = eye->valuestring;
+    }
+    if (cJSON_IsString(lid)) {
+        twitch.lid = lid->valuestring;
+    }
+    cJSON* every = cJSON_GetObjectItem(body, "every");
+    if (cJSON_IsArray(every) && cJSON_GetArraySize(every) == 2) {
+        twitch.everyMinMs = uitk::clamp(cJSON_GetArrayItem(every, 0)->valueint, 100, 120000);
+        twitch.everyMaxMs = uitk::clamp(cJSON_GetArrayItem(every, 1)->valueint, twitch.everyMinMs, 120000);
+    }
+    twitch.flutters = uitk::clamp(json_int(body, "flutters", twitch.flutters), 1, 10);
+    cJSON_Delete(body);
+
+    uint32_t count = 0;
+    bool done      = false;
+    {
+        LvglLockGuard lock;
+        auto& stackchan = GetStackChan();
+        if (stackchan.hasAvatar()) {
+            if (auto* custom = dynamic_cast<avatar::CustomAvatar*>(&stackchan.avatar())) {
+                custom->setTwitch(twitch);
+                count = custom->twitchCount();
+                done  = true;
+            }
+        }
+    }
+    if (!done) {
+        return send_error(req, "409 Conflict", "the current face has no lids to twitch");
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddBoolToObject(root, "on", twitch.on);
+    cJSON_AddNumberToObject(root, "twitches", count);
+    return send_json(req, root);
+}
+
+esp_err_t handle_react(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    cJSON* body = read_body(req);
+    if (body == nullptr) {
+        return send_error(req, "400 Bad Request", "expected a JSON body");
+    }
+    cJSON* name = cJSON_GetObjectItem(body, "name");
+    if (!cJSON_IsString(name)) {
+        cJSON_Delete(body);
+        return send_error(req, "400 Bad Request", "expected {\"name\": \"...\"}");
+    }
+    const std::string pose = name->valuestring;
+    const int ms           = uitk::clamp(json_int(body, "ms", 2000), 200, 15000);
+    cJSON_Delete(body);
+    {
+        LvglLockGuard lock;
+        auto& stackchan = GetStackChan();
+        if (stackchan.hasAvatar()) {
+            if (auto* custom = dynamic_cast<avatar::CustomAvatar*>(&stackchan.avatar())) {
+                custom->react(pose, ms);
+            }
+        }
+    }
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    return send_json(req, root);
+}
+
+esp_err_t handle_touch_raw(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    uint32_t since = 0;
+    char query[32] = {0}, value[16] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "since", value, sizeof(value)) == ESP_OK) {
+        since = std::strtoul(value, nullptr, 10);
+    }
+    constexpr size_t kCapacity = 48 * 1024;
+    char* text                 = static_cast<char*>(heap_caps_malloc(kCapacity, MALLOC_CAP_SPIRAM));
+    if (text == nullptr) {
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    const size_t used = touch_log::read(since, text, kCapacity);
+    httpd_resp_set_type(req, "text/plain");
+    const esp_err_t err = httpd_resp_send(req, text, used);
+    heap_caps_free(text);
+    return err;
+}
+
+struct PhotoJob_t {
+    SemaphoreHandle_t done = nullptr;
+    uint8_t* jpeg          = nullptr;
+    size_t size            = 0;
+    int width              = 0;
+    int height             = 0;
+    size_t heap_while_on   = 0;
+    const char* error      = nullptr;
+};
+
+// The camera art, up for as long as the sensor is on. The red light lives with the sensor itself.
+int show_camera_art()
+{
+    LvglLockGuard lock;
+    auto& stackchan = GetStackChan();
+    return stackchan.hasAvatar() ? stackchan.avatar().addNamedDecorator("camera", 0) : -1;
+}
+
+void hide_camera_art(int id)
+{
+    if (id < 0) {
+        return;
+    }
+    LvglLockGuard lock;
+    auto& stackchan = GetStackChan();
+    if (stackchan.hasAvatar()) {
+        stackchan.avatar().removeDecorator(id);
+    }
+}
+
+// Runs on a PSRAM stack: the JPEG encoder wants more stack than internal RAM should give.
+void photo_task(void* arg)
+{
+    auto* job = static_cast<PhotoJob_t*>(arg);
+    const int art = show_camera_art();
+
+    uint8_t* frame = nullptr;
+    size_t length  = 0;
+    int format     = 0;
+    auto* camera   = hal_bridge::camera_open();
+    if (camera == nullptr) {
+        job->error = "the camera didn't start";
+    } else {
+        job->heap_while_on = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        auto lock          = camera->TryLockFrame();
+        bool captured      = false;
+        // a sensor just woken needs a moment to find its exposure
+        constexpr int kSettleFrames = 12;
+        for (int i = 0; i < kSettleFrames; i++) {
+            captured = camera->StreamCaptures();
+        }
+        if (!captured || camera->GetFrameData() == nullptr) {
+            job->error = "the capture failed";
+        } else {
+            length      = camera->GetFrameSize();
+            format      = camera->GetFrameFormat();
+            job->width  = camera->GetFrameWidth();
+            job->height = camera->GetFrameHeight();
+            frame       = static_cast<uint8_t*>(heap_caps_malloc(length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (frame == nullptr) {
+                job->error = "out of memory";
+            } else {
+                std::memcpy(frame, camera->GetFrameData(), length);
+            }
+        }
+        lock.unlock();
+    }
+    hal_bridge::camera_close();  // off before encoding: the picture's taken, and the RAM comes back
+    hide_camera_art(art);
+
+    if (frame != nullptr) {
+        if (!image_to_jpeg(frame, length, job->width, job->height, (v4l2_pix_fmt_t)format, 60, &job->jpeg, &job->size) ||
+            job->jpeg == nullptr) {
+            job->error = "the jpeg failed";
+        }
+        heap_caps_free(frame);
+    }
+
+    xSemaphoreGive(job->done);
+    vTaskSuspend(nullptr);  // the handler deletes this task, which frees its stack
+}
+
+esp_err_t handle_photo(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    // the mic channel holds the RAM the camera needs
+    if (!hal_bridge::is_xiaozhi_idle()) {
+        return send_error(req, "409 Conflict", "busy talking: the mic channel has to close first");
+    }
+    constexpr size_t kNeedFree = 42 * 1024;
+    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < kNeedFree) {
+        return send_error(req, "503 Service Unavailable", "not enough memory for the camera right now");
+    }
+
+    char query[32] = {0};
+    bool probe     = false;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        probe = std::strstr(query, "probe=1") != nullptr;
+    }
+
+    PhotoJob_t job;
+    job.done = xSemaphoreCreateBinary();
+    if (job.done == nullptr) {
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    TaskHandle_t task = nullptr;
+    if (xTaskCreatePinnedToCoreWithCaps(photo_task, "photo", 16 * 1024, &job, 3, &task, 1, MALLOC_CAP_SPIRAM) != pdPASS) {
+        vSemaphoreDelete(job.done);
+        return send_error(req, "500 Internal Server Error", "could not start the photo task");
+    }
+    if (xSemaphoreTake(job.done, pdMS_TO_TICKS(30000)) != pdTRUE) {
+        // the task still holds job, which lives on this stack: this is not recoverable in place
+        ESP_LOGE("HAL-Control", "photo task hung, rebooting");
+        esp_restart();
+    }
+    vTaskDeleteWithCaps(task);
+    vSemaphoreDelete(job.done);
+
+    if (job.error != nullptr) {
+        free(job.jpeg);
+        return send_error(req, "500 Internal Server Error", job.error);
+    }
+
+    if (probe) {
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON_AddNumberToObject(root, "width", job.width);
+        cJSON_AddNumberToObject(root, "height", job.height);
+        cJSON_AddNumberToObject(root, "jpegBytes", job.size);
+        cJSON_AddNumberToObject(root, "heapWhileOn", job.heap_while_on);
+        cJSON_AddNumberToObject(root, "heapAfter", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        free(job.jpeg);
+        return send_json(req, root);
+    }
+
+    httpd_resp_set_type(req, "image/jpeg");
+    esp_err_t err = httpd_resp_send(req, reinterpret_cast<const char*>(job.jpeg), job.size);
+    free(job.jpeg);
+    return err;
+}
+
+esp_err_t handle_face(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+
+    char crc_text[12] = {0};
+    if (req->content_len <= 0 || httpd_req_get_hdr_value_str(req, "X-Face-Crc32", crc_text, sizeof(crc_text)) != ESP_OK) {
+        return send_error(req, "400 Bad Request", "expected a bundle and an X-Face-Crc32 header");
+    }
+    const uint32_t crc = std::strtoul(crc_text, nullptr, 16);
+
+    if (!face_push::begin(req->content_len)) {
+        return send_error(req, "400 Bad Request", "no room for a bundle that size");
+    }
+
+    constexpr size_t kBuffer = 4096;
+    char* buffer             = static_cast<char*>(heap_caps_malloc(kBuffer, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (buffer == nullptr) {
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+
+    size_t remaining = req->content_len;
+    int timeouts     = 0;
+    bool ok          = true;
+    while (ok && remaining > 0) {
+        const int got = httpd_req_recv(req, buffer, std::min(remaining, kBuffer));
+        if (got == HTTPD_SOCK_ERR_TIMEOUT) {
+            ok = ++timeouts <= 5;
+            continue;
+        }
+        ok = got > 0 && face_push::write(buffer, got);
+        if (ok) {
+            timeouts = 0;
+            remaining -= got;
+        }
+    }
+    heap_caps_free(buffer);
+
+    if (!ok || !face_push::commit(crc)) {
+        return send_error(req, "400 Bad Request", "the upload was cut short or failed its checksum");
+    }
+    mclog::tagInfo(_tag, "face bundle waiting: {} bytes", req->content_len);
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddNumberToObject(root, "bytes", req->content_len);
+    return send_json(req, root);
+}
+
+esp_err_t handle_face_restore(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    if (!face_push::request_restore()) {
+        return send_error(req, "500 Internal Server Error", "could not mark it");
+    }
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    return send_json(req, root);
+}
+
+esp_err_t handle_wake(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    if (!hal_bridge::is_xiaozhi_ready() || !hal_bridge::is_xiaozhi_idle()) {
+        return send_error(req, "409 Conflict", "the channel isn't idle");
+    }
+    hal_bridge::toggle_xiaozhi_chat_state();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    return send_json(req, root);
+}
+
+esp_err_t handle_reboot(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    // a moment later, so the answer gets out first
+    static esp_timer_handle_t timer = nullptr;
+    if (timer == nullptr) {
+        esp_timer_create_args_t args = {};
+        args.callback                = [](void*) { esp_restart(); };
+        args.name                    = "reboot";
+        if (esp_timer_create(&args, &timer) != ESP_OK) {
+            return send_error(req, "500 Internal Server Error", "could not schedule it");
+        }
+    }
+    esp_timer_start_once(timer, 500 * 1000);
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    return send_json(req, root);
+}
+
 esp_err_t handle_say(httpd_req_t* req)
 {
     if (!token_ok(req)) {
@@ -346,6 +721,7 @@ void start_httpd()
     config.ctrl_port        = CONFIG_STACKCHAN_CONTROL_PORT + 1;
     config.max_open_sockets = 4;
     config.lru_purge_enable = true;
+    config.max_uri_handlers = 20;  // the default of 8 is full, and past it a route fails to register
 #ifdef CONFIG_STACKCHAN_CAMERA
     config.stack_size = 8192;  // the JPEG encoder runs on this task
 #else
@@ -375,43 +751,6 @@ void start_httpd()
         return send_text_and_free(req, text, length);
     };
 
-#ifdef CONFIG_STACKCHAN_CAMERA
-    // The first frames after a pause are dark while the sensor settles, so a few go by.
-    static const auto handle_photo = [](httpd_req_t* req) -> esp_err_t {
-        if (!token_ok(req)) {
-            return send_error(req, "401 Unauthorized", "bad or missing token");
-        }
-        auto* camera = hal_bridge::board_get_camera();
-        if (camera == nullptr) {
-            return send_error(req, "503 Service Unavailable", "no camera");
-        }
-        auto lock = camera->TryLockFrame();
-        if (!lock.owns_lock()) {
-            return send_error(req, "503 Service Unavailable", "camera busy");
-        }
-        bool captured = false;
-        for (int i = 0; i < 4; i++) {
-            captured = camera->StreamCaptures();
-        }
-        if (!captured) {
-            return send_error(req, "500 Internal Server Error", "capture failed");
-        }
-        uint8_t* jpeg = nullptr;
-        size_t size   = 0;
-        bool encoded  = image_to_jpeg(const_cast<uint8_t*>(camera->GetFrameData()), camera->GetFrameSize(),
-                                      camera->GetFrameWidth(), camera->GetFrameHeight(),
-                                      (v4l2_pix_fmt_t)camera->GetFrameFormat(), 60, &jpeg, &size);
-        if (!encoded || jpeg == nullptr) {
-            free(jpeg);
-            return send_error(req, "500 Internal Server Error", "jpeg failed");
-        }
-        httpd_resp_set_type(req, "image/jpeg");
-        esp_err_t err = httpd_resp_send(req, reinterpret_cast<const char*>(jpeg), size);
-        free(jpeg);
-        return err;
-    };
-#endif
-
     static const auto handle_touch = [](httpd_req_t* req) -> esp_err_t {
         if (!token_ok(req)) {
             return send_error(req, "401 Unauthorized", "bad or missing token");
@@ -427,9 +766,9 @@ void start_httpd()
 
     static const httpd_uri_t routes[] = {
         {"/api/touch", HTTP_GET, handle_touch, nullptr},
-#ifdef CONFIG_STACKCHAN_CAMERA
         {"/api/photo", HTTP_GET, handle_photo, nullptr},
-#endif
+        {"/api/touch-raw", HTTP_GET, handle_touch_raw, nullptr},
+        {"/api/react", HTTP_POST, handle_react, nullptr},
         {"/api/status", HTTP_GET, handle_status, nullptr},
         {"/api/ram", HTTP_GET, handle_ram, nullptr},
         {"/api/log", HTTP_GET, handle_log, nullptr},
@@ -437,6 +776,11 @@ void start_httpd()
         {"/api/led", HTTP_POST, handle_led, nullptr},
         {"/api/emotion", HTTP_POST, handle_emotion, nullptr},
         {"/api/say", HTTP_POST, handle_say, nullptr},
+        {"/api/twitch", HTTP_POST, handle_twitch, nullptr},
+        {"/api/face", HTTP_POST, handle_face, nullptr},
+        {"/api/face-restore", HTTP_POST, handle_face_restore, nullptr},
+        {"/api/reboot", HTTP_POST, handle_reboot, nullptr},
+        {"/api/wake", HTTP_POST, handle_wake, nullptr},
     };
     for (const auto& route : routes) {
         httpd_register_uri_handler(_server, &route);

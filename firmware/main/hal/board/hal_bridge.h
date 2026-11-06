@@ -56,6 +56,13 @@ void set_xiaozhi_config(const XiaozhiConfig_t& config);
 
 i2c_master_bus_handle_t board_get_i2c_bus();
 StackChanCamera* board_get_camera();
+/**
+ * The camera costs about 36 KB of internal RAM while it's on, so it's on only for a photo.
+ * These two are the only way to turn it on and off, and they carry the red light with them,
+ * so the light can't disagree with the sensor.
+ */
+StackChanCamera* camera_open();
+void camera_close();
 int board_get_battery_level();
 bool board_is_battery_charging();
 void board_set_backlight_brightness(uint8_t brightness, bool permanent = false);

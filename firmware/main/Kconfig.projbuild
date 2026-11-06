@@ -46,7 +46,7 @@ endmenu
 menu "StackChan Hardware"
 
 config STACKCHAN_CAMERA
-    bool "Start the camera at boot"
+    bool "Keep the camera on from boot (GET /api/photo starts it on demand without this)"
     default n
     help
         The camera takes about 36 KB of internal RAM from boot whether or not
